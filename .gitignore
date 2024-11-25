@@ -167,3 +167,12 @@ tmp
 .DS_Store
 
 private_example.py
+
+
+#more
+/menv
+/benv
+/results
+/venv
+/test_sessions
+/screenshots

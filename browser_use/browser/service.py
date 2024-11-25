@@ -5,8 +5,11 @@ Playwright browser on steroids.
 import asyncio
 import base64
 import logging
+import os
 import time
+from datetime import datetime
 from dataclasses import dataclass
+from pathlib import Path
 
 from playwright.async_api import Browser as PlaywrightBrowser
 from playwright.async_api import BrowserContext, ElementHandle, Page, Playwright, async_playwright
@@ -18,6 +21,13 @@ from browser_use.utils import time_execution_sync
 
 logger = logging.getLogger(__name__)
 
+# Simple device viewport configurations
+DEVICE_VIEWPORTS = {
+	'desktop': {'width': 1280, 'height': 800},
+	'tablet': {'width': 768, 'height': 1024},
+	'mobile': {'width': 375, 'height': 812}
+}
+
 
 @dataclass
 class BrowserSession:
@@ -26,20 +36,73 @@ class BrowserSession:
 	context: BrowserContext
 	current_page: Page
 	cached_state: BrowserState
-	# current_page_id: str
-	# opened_tabs: dict[str, TabInfo] = field(default_factory=dict)
 
 
 class Browser:
 	MINIMUM_WAIT_TIME = 0.5
 	MAXIMUM_WAIT_TIME = 5
 
-	def __init__(self, headless: bool = False, keep_open: bool = False):
+	def __init__(
+			self,
+			headless: bool = True,
+			keep_open: bool = False,
+			take_screenshots: bool = True,
+			device: str = 'desktop',
+			screenshots_dir: str = None
+	):
 		self.headless = headless
 		self.keep_open = keep_open
+		self.take_screenshots = take_screenshots
+		self.device = device
+		self.screenshot_count = 0
 
-		# Initialize these as None - they'll be set up when needed
+
+
+		# Set up screenshots directory with timestamp if not provided
+		if self.take_screenshots:
+			if screenshots_dir is None:
+				timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+				self.screenshots_dir = f'screenshots/browsing_{timestamp}'
+			else:
+				self.screenshots_dir = screenshots_dir
+			os.makedirs(self.screenshots_dir, exist_ok=True)
+			logger.info(f"Screenshots will be saved in: {self.screenshots_dir}")
+		else:
+			self.screenshots_dir = None
+
+		if self.device not in DEVICE_VIEWPORTS:
+			raise ValueError(f"Device must be one of: {', '.join(DEVICE_VIEWPORTS.keys())}")
+
 		self.session: BrowserSession | None = None
+
+		logger.info(f"Browser initialized with:")
+		logger.info(f"- Headless: {self.headless}")
+		logger.info(f"- Screenshots: {self.take_screenshots}")
+		logger.info(f"- Device: {self.device}")
+		logger.info(f"- Screenshots dir: {self.screenshots_dir}")
+
+	async def _take_step_screenshot(self, action: str) -> None:
+		"""Take a screenshot if enabled"""
+		if not self.take_screenshots or not self.screenshots_dir:
+			return
+
+		try:
+			page = await self.get_current_page()
+			self.screenshot_count += 1
+			timestamp = datetime.now().strftime('%H%M%S')
+			filename = f"{self.screenshot_count:03d}_{action}_{timestamp}.png"
+			filepath = os.path.join(self.screenshots_dir, filename)
+
+			logger.info(f"Taking screenshot: {filename}")
+			await page.screenshot(
+				path=filepath,
+				full_page=True,
+				animations='disabled'
+			)
+			logger.info(f"Screenshot saved: {filepath}")
+
+		except Exception as e:
+			logger.error(f"Failed to take screenshot: {str(e)}")
 
 	async def _initialize_session(self):
 		"""Initialize the browser session"""
@@ -111,7 +174,7 @@ class Browser:
 	async def _create_context(self, browser: PlaywrightBrowser):
 		"""Creates a new browser context with anti-detection measures."""
 		context = await browser.new_context(
-			viewport={'width': 1280, 'height': 1024},
+			viewport=DEVICE_VIEWPORTS[self.device],
 			user_agent=(
 				'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
 				'(KHTML, like Gecko) Chrome/85.0.4183.102 Safari/537.36'
@@ -198,16 +261,26 @@ class Browser:
 			asyncio.run(self.close(force=True))
 
 	async def navigate_to(self, url: str):
-		"""Navigate to a URL"""
+		"""Navigate to a URL and take screenshot"""
+		logger.info(f"Navigating to: {url}")
 		page = await self.get_current_page()
-		await page.goto(url)
-		await self.wait_for_page_load()
+
+		try:
+			await page.goto(url)
+			await self.wait_for_page_load()
+			await self._take_step_screenshot('after_navigate')
+			logger.info(f"Successfully navigated to: {url}")
+		except Exception as e:
+			logger.error(f"Navigation failed: {str(e)}")
+			await self._take_step_screenshot('navigate_error')
+			raise
 
 	async def refresh_page(self):
 		"""Refresh the current page"""
 		page = await self.get_current_page()
 		await page.reload()
 		await self.wait_for_page_load()
+		await self._take_step_screenshot('after_refresh')
 
 	async def go_back(self):
 		"""Navigate back in history"""
@@ -376,6 +449,7 @@ class Browser:
 			await element.fill('')
 			await element.type(text)
 			await self.wait_for_page_load()
+			await self._take_step_screenshot('input')
 
 		except Exception as e:
 			raise Exception(
@@ -399,6 +473,7 @@ class Browser:
 			try:
 				await element.click(timeout=2500)
 				await self.wait_for_page_load()
+				await self._take_step_screenshot('after_click')
 				return
 			except Exception:
 				pass
@@ -406,9 +481,12 @@ class Browser:
 			try:
 				await page.evaluate('(el) => el.click()', element)
 				await self.wait_for_page_load()
+				await self._take_step_screenshot('click')
 				return
 			except Exception as e:
-				raise Exception(f'Failed to click element: {str(e)}')
+				logger.error(f"Click failed: {str(e)}")
+				await self._take_step_screenshot('click_error')
+				raise
 
 		except Exception as e:
 			raise Exception(f'Failed to click element with xpath: {xpath}. Error: {str(e)}')
@@ -453,6 +531,7 @@ class Browser:
 
 		if url:
 			await page.goto(url)
+			await self._take_step_screenshot('navigated to url on new tab')
 			await self.wait_for_page_load(timeout_overwrite=1)
 
 	# endregion
