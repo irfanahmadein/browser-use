@@ -10,7 +10,8 @@ import os
 import time
 import uuid
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, TypedDict
+from typing import TYPE_CHECKING, TypedDict,Optional
+from datetime import datetime
 
 from playwright.async_api import Browser as PlaywrightBrowser
 from playwright.async_api import (
@@ -74,14 +75,13 @@ class BrowserContextConfig:
 	minimum_wait_page_load_time: float = 0.5
 	wait_for_network_idle_page_load_time: float = 1
 	maximum_wait_page_load_time: float = 5
-
 	disable_security: bool = False
-
 	extra_chromium_args: list[str] = field(default_factory=list)
 	browser_window_size: BrowserContextWindowSize = field(
 		default_factory=lambda: {'width': 1280, 'height': 1024}
 	)
-
+	take_screenshots: bool = True
+	screenshots_dir: Optional[str] = None
 	save_recording_path: str | None = None
 	trace_path: str | None = None
 
@@ -104,6 +104,7 @@ class BrowserContext:
 
 		self.config = config
 		self.browser = browser
+		self.screenshot_count = 0
 
 		# Initialize these as None - they'll be set up when needed
 		self.session: BrowserSession | None = None
@@ -444,11 +445,43 @@ class BrowserContext:
 		if remaining > 0:
 			await asyncio.sleep(remaining)
 
+	async def _take_step_screenshot(self, action: str) -> None:
+		"""Take a screenshot if enabled"""
+		if not self.config.take_screenshots or not self.config.screenshots_dir:
+			return
+
+		try:
+			page = await self.get_current_page()
+			self.screenshot_count += 1
+			timestamp = datetime.now().strftime('%H%M%S')
+			filename = f"{self.screenshot_count:03d}_{action}_{timestamp}.png"
+			filepath = os.path.join(self.config.screenshots_dir, filename)
+
+			logging.info(f"Taking screenshot: {filename}")
+			await page.screenshot(
+				path=filepath,
+				full_page=True,
+				animations='disabled'
+			)
+			logging.info(f"Screenshot saved: {filepath}")
+
+		except Exception as e:
+			logging.error(f"Failed to take screenshot: {str(e)}")
+
 	async def navigate_to(self, url: str):
-		"""Navigate to a URL"""
+		"""Navigate to a URL and take screenshot"""
+		logging.info(f"Navigating to: {url}")
 		page = await self.get_current_page()
-		await page.goto(url)
-		await page.wait_for_load_state()
+
+		try:
+			await page.goto(url)
+			await self._wait_for_page_and_frames_load()
+			await self._take_step_screenshot('after_navigate')
+			logging.info(f"Successfully navigated to: {url}")
+		except Exception as e:
+			logging.error(f"Navigation failed: {str(e)}")
+			await self._take_step_screenshot('navigate_error')
+			raise
 
 	async def refresh_page(self):
 		"""Refresh the current page"""
@@ -761,34 +794,35 @@ class BrowserContext:
 			await element.fill('')
 			await element.type(text)
 			await page.wait_for_load_state()
+			await self._take_step_screenshot('input')
 
 		except Exception as e:
+			await self._take_step_screenshot('input_error')
 			raise Exception(
 				f'Failed to input text into element: {repr(element_node)}. Error: {str(e)}'
 			)
 
 	async def _click_element_node(self, element_node: DOMElementNode):
-		"""
-		Optimized method to click an element using xpath.
-		"""
+		"""Click element and take screenshot"""
 		page = await self.get_current_page()
 
 		try:
 			element = await self.get_locate_element(element_node)
-
 			if element is None:
 				raise Exception(f'Element: {repr(element_node)} not found')
-
-			# await element.scroll_into_view_if_needed()
 
 			try:
 				await element.click(timeout=2500)
 				await page.wait_for_load_state()
+				await self._take_step_screenshot('after_click')
 			except Exception:
 				try:
 					await page.evaluate('(el) => el.click()', element)
 					await page.wait_for_load_state()
+					await self._take_step_screenshot('after_click')
 				except Exception as e:
+					logging.error(f"Click failed: {str(e)}")
+					await self._take_step_screenshot('click_error')
 					raise Exception(f'Failed to click element: {str(e)}')
 
 		except Exception as e:
@@ -835,6 +869,7 @@ class BrowserContext:
 		if url:
 			await page.goto(url)
 			await self._wait_for_page_and_frames_load(timeout_overwrite=1)
+			await self._take_step_screenshot('navigated_to_url_on_new_tab')
 
 	# endregion
 

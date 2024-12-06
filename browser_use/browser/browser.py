@@ -4,7 +4,9 @@ Playwright browser on steroids.
 
 import asyncio
 import logging
+import os
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, TypedDict,Optional
 
 from playwright.async_api import Browser as PlaywrightBrowser
 from playwright.async_api import (
@@ -12,6 +14,7 @@ from playwright.async_api import (
 	async_playwright,
 )
 
+from datetime import datetime
 from browser_use.browser.context import BrowserContext, BrowserContextConfig
 
 logger = logging.getLogger(__name__)
@@ -40,8 +43,19 @@ class BrowserConfig:
 	disable_security: bool = False
 	extra_chromium_args: list[str] = field(default_factory=list)
 	wss_url: str | None = None
-
+	take_screenshots: bool = True
+	screenshots_dir: Optional[str] = None
 	new_context_config: BrowserContextConfig = field(default_factory=BrowserContextConfig)
+
+	def __post_init__(self):
+		if self.take_screenshots:
+			if not self.screenshots_dir:
+				timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+				self.screenshots_dir = f'results/screenshots/browsing_{timestamp}'
+			os.makedirs(self.screenshots_dir, exist_ok=True)
+			logging.info(f"Screenshots will be saved in: {self.screenshots_dir}")
+
+
 
 
 # @singleton: TODO - think about id singleton makes sense here
@@ -64,10 +78,13 @@ class Browser:
 		self.playwright_browser: PlaywrightBrowser | None = None
 
 	async def new_context(
-		self, config: BrowserContextConfig = BrowserContextConfig()
+			self, config: BrowserContextConfig = BrowserContextConfig()
 	) -> BrowserContext:
-		"""Create a browser context"""
-		return BrowserContext(config=config, browser=self)
+		"""Create a browser context with screenshot settings inherited from browser config"""
+		context_config = config
+		context_config.take_screenshots = self.config.take_screenshots
+		context_config.screenshots_dir = self.config.screenshots_dir
+		return BrowserContext(config=context_config, browser=self)
 
 	async def get_playwright_browser(self) -> PlaywrightBrowser:
 		"""Get a browser context"""
